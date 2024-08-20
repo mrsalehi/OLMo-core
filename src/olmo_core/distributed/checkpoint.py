@@ -133,6 +133,7 @@ def load_model_and_optim_state(
     model: nn.Module,
     optim: Optional[torch.optim.Optimizer] = None,
     validate: bool = True,
+    prefix: Optional[str] = None,
 ):
     """
     Load model and optimizer state in-place from a checkpoint saved via :func:`save_model_and_optim_state()`.
@@ -162,7 +163,7 @@ def load_model_and_optim_state(
     model_state = _get_model_state_dict_for_checkpoint(model)
     if validate:
         _fill_state_dict_with_nan(model_state)
-    checkpointer.load(f"{dir}/model", model_state, _check_for_nans=validate)
+    checkpointer.load(f"{dir}/model", model_state, _check_for_nans=validate, prefix=prefix)
     _load_model_state_dict(model, model_state)
 
     if optim is not None:
@@ -355,6 +356,7 @@ class Checkpointer:
         metadata: Optional[StorageMetadata] = None,
         _safetensors_mfl: Optional[SafeTensorsMultiFileLoader] = None,
         _check_for_nans: bool = False,
+        prefix: Optional[str] = None,
     ):
         """
         Load a state dict in-place.
@@ -371,7 +373,11 @@ class Checkpointer:
         # Load each tensor from the slices in each file.
         for key in state_dict.keys():
             log.debug("Loading tensor '%s' from state dict...", key)
-            tensor_storage_metadata = metadata.tensors[key]
+            if prefix is not None and not key.startswith(prefix):
+                metadata_key = f"{prefix}{key}"
+            else:
+                metadata_key = key
+            tensor_storage_metadata = metadata.tensors[metadata_key]
             tensor = state_dict[key]
             flat_view = self._get_flat_view(tensor)
 
@@ -397,24 +403,29 @@ class Checkpointer:
 
                 with safetensors_mfl.open(f"{dir}/{filename}") as loader:
                     # Validate the shard in the file.
-                    if len((shape_in_file := loader.get_shape(key))) != 1:
+                    # if len((shape_in_file := loader.get_shape(key))) != 1:
+                    if len((shape_in_file := loader.get_shape(metadata_key))) != 1:
                         raise ValueError(
-                            f"Expected a 1D tensor at {key} in {filename}, found shape {shape_in_file}"
+                            # f"Expected a 1D tensor at {key} in {filename}, found shape {shape_in_file}"
+                            f"Expected a 1D tensor at {metadata_key} in {filename}, found shape {shape_in_file}"
                         )
-                    if (dtype := loader.get_dtype(key)) != tensor.dtype:
+                    # if (dtype := loader.get_dtype(key)) != tensor.dtype:
+                    if (dtype := loader.get_dtype(metadata_key)) != tensor.dtype:
                         raise ValueError(
                             f"Data type mismatch between tensor to load ({dtype}) and to load into ({tensor.dtype})"
                         )
 
                     if overlap == OverlapType.EQUAL:
-                        flat_view.view.copy_(loader.get_flat_slice(key))
+                        # flat_view.view.copy_(loader.get_flat_slice(key))
+                        flat_view.view.copy_(loader.get_flat_slice(metadata_key))
                         break
 
                     slice_in_file: Optional[torch.Tensor] = None
                     if overlap == OverlapType.SUPERSET:
                         # Optimization: pre-load the entire slice in the file when the slice to load
                         # is a superset of the slice in the file.
-                        slice_in_file = loader.get_flat_slice(key)
+                        # slice_in_file = loader.get_flat_slice(key)
+                        slice_in_file = loader.get_flat_slice(metadata_key)
 
                     for offsets, flat_view_slice in flat_view.get_local_flattened_offsets_with_slice():
                         if offsets[1] - offsets[0] == 0:
@@ -484,7 +495,8 @@ class Checkpointer:
                                     load_shape := flat_view_slice[flat_tensor_start:flat_tensor_end].shape
                                 ) != flat_tensor_to_load.shape:
                                     raise RuntimeError(
-                                        f"Error loading tensor '{key}' with offsets {offsets} "
+                                        # f"Error loading tensor '{key}' with offsets {offsets} "
+                                        f"Error loading tensor '{metadata_key}' with offsets {offsets} "
                                         f"from file '{filename}' with offsets {offsets_in_file}.\n"
                                         f"Loading into slice ({flat_tensor_start}, {flat_tensor_end}) from "
                                         f"slice ({flat_tensor_to_load_start}, {flat_tensor_to_load_end}) failed, "
